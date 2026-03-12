@@ -1,6 +1,5 @@
 # Fridge Chef AI — Hackathon Submission Guide
 
-Congratulations on pivoting to the **Gemini Live Agent Challenge**! Here is the text and documentation you need for your Devpost submission.
 
 ---
 
