@@ -1,0 +1,24 @@
+# Python virtual environment
+venv/
+
+# Secret environment file - NEVER share this!
+.env
+*.env
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Database files
+*.db
+
+# VS Code settings
+.vscode/
+
+# YOLO / AI model weights
+ai_models/*.pt
+
+# Build artifacts
+dist/
+build/

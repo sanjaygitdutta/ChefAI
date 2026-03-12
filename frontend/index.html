@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fridge Chef AI — Chef Aika</title>
+  <meta name="description"
+    content="Chef Aika — Your AI kitchen companion. Show your fridge, speak your cravings, hear your recipe." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;600;700&family=Inter:wght@300;400;500;600&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+
+<body>
+
+  <!-- ─── HEADER ─────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <span class="logo-icon">🍳</span>
+        <div class="logo-text">
+          <span class="logo-name">Fridge Chef</span>
+          <span class="logo-sub">powered by Gemini Live</span>
+        </div>
+      </div>
+      <div class="aika-status" id="aikaStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Chef Aika is offline</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ─── MAIN LAYOUT ───────────────────────────────────────────────────── -->
+  <main class="main-layout">
+
+    <!-- LEFT PANEL: Fridge Scanner + Ingredient List -->
+    <section class="panel panel-left">
+      <h2 class="panel-title">🥕 Your Fridge</h2>
+
+      <!-- Camera Scanner -->
+      <div class="scanner-card" id="scannerCard">
+        <div class="camera-preview" id="cameraPreview">
+          <video id="cameraVideo" autoplay playsinline></video>
+          <canvas id="cameraCanvas" style="display:none;"></canvas>
+          <div class="camera-overlay" id="cameraOverlay">
+            <div class="camera-frame"></div>
+            <p>Point at your fridge or ingredients</p>
+          </div>
+        </div>
+        <div class="scanner-actions">
+          <button class="btn btn-camera" id="btnStartCamera" onclick="startCamera()">
+            📷 Open Camera
+          </button>
+          <button class="btn btn-scan" id="btnScanFridge" onclick="scanFridge()" style="display:none;">
+            🔍 Scan Ingredients
+          </button>
+          <label class="btn btn-upload" for="imageUpload">
+            📁 Upload Photo
+            <input type="file" id="imageUpload" accept="image/*" onchange="handleImageUpload(event)"
+              style="display:none;" />
+          </label>
+        </div>
+        <div class="scan-status" id="scanStatus"></div>
+      </div>
+
+      <!-- Ingredient List -->
+      <div class="ingredient-section">
+        <div class="ingredient-header">
+          <h3>Detected Ingredients</h3>
+          <button class="btn-clear" onclick="clearIngredients()">Clear All</button>
+        </div>
+        <div class="add-ingredient-row">
+          <input type="text" id="manualIngredient" placeholder="Add ingredient manually..." class="ingredient-input" />
+          <button class="btn-add" onclick="addManualIngredient()">+</button>
+        </div>
+        <div class="ingredient-list" id="ingredientList">
+          <p class="empty-state">No ingredients yet. Scan your fridge or add manually! 🌿</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- CENTER PANEL: Chef Aika Voice -->
+    <section class="panel panel-center">
+      <div class="aika-card">
+        <div class="aika-avatar" id="aikaAvatar">
+          <div class="avatar-ring"></div>
+          <span class="avatar-emoji">👩‍🍳</span>
+          <div class="waveform" id="waveform">
+            <span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+        </div>
+        <div class="aika-name">Chef Aika</div>
+        <div class="aika-tagline">Your AI Kitchen Companion</div>
+
+        <!-- Voice Controls -->
+        <div class="voice-controls">
+          <button class="btn-voice" id="btnVoice" onclick="toggleVoice()">
+            <span class="voice-icon">🎤</span>
+            <span class="voice-label">Talk to Chef Aika</span>
+          </button>
+        </div>
+
+        <!-- Transcript -->
+        <div class="transcript-box" id="transcriptBox">
+          <div class="transcript-message ai">
+            <span>👩‍🍳 Welcome! I'm Chef Aika. Show me what's in your fridge, and I'll help you cook something amazing!
+              🍽️</span>
+          </div>
+        </div>
+
+        <!-- Timer Display (Ultimate Tweak) -->
+        <div class="kitchen-timer" id="kitchenTimer" style="display:none;">
+          <div class="timer-label" id="timerLabel">Timer</div>
+          <div class="timer-countdown" id="timerCountdown">00:00</div>
+          <button class="btn-clear-timer" onclick="stopTimer()">dismiss</button>
+        </div>
+
+        <!-- Generate Recipe Button -->
+        <button class="btn-generate" id="btnGenerate" onclick="generateRecipe()">
+          ✨ Generate Recipe from My Fridge
+        </button>
+
+        <div class="options-row">
+          <select id="servings" class="select-input">
+            <option value="1">1 serving</option>
+            <option value="2" selected>2 servings</option>
+            <option value="4">4 servings</option>
+            <option value="6">6 servings</option>
+          </select>
+          <select id="dietary" class="select-input">
+            <option value="">No restrictions</option>
+            <option value="vegetarian">Vegetarian</option>
+            <option value="vegan">Vegan</option>
+            <option value="gluten-free">Gluten-Free</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Recipe Display -->
+    <section class="panel panel-right">
+      <h2 class="panel-title">🍽️ Today's Recipe</h2>
+
+      <div class="recipe-card" id="recipeCard">
+        <div class="recipe-empty" id="recipeEmpty">
+          <div class="recipe-empty-icon">📖</div>
+          <p>Your personalized recipe will appear here...</p>
+          <p class="recipe-empty-sub">Add some ingredients and tap <strong>Generate Recipe</strong>!</p>
+        </div>
+
+        <div class="recipe-content" id="recipeContent" style="display:none;">
+          <div class="recipe-header-card">
+            <h2 class="recipe-name" id="recipeName"></h2>
+            <p class="recipe-description" id="recipeDescription"></p>
+            <div class="recipe-meta">
+              <div class="meta-item">⏱️ <span id="recipePrepTime"></span> prep</div>
+              <div class="meta-item">🔥 <span id="recipeCookTime"></span> cook</div>
+              <div class="meta-item">👥 <span id="recipeServings"></span> servings</div>
+            </div>
+          </div>
+
+          <div class="recipe-section">
+            <h3>🥗 Ingredients</h3>
+            <ul class="recipe-ingredients" id="recipeIngredients"></ul>
+          </div>
+
+          <div class="recipe-section">
+            <h3>👩‍🍳 Instructions</h3>
+            <ol class="recipe-steps" id="recipeSteps"></ol>
+          </div>
+
+          <div class="recipe-tips" id="recipeTipsBox" style="display:none;">
+            <h3>💡 Chef's Tip</h3>
+            <p id="recipeTips"></p>
+          </div>
+
+          <button class="btn-read-aloud" onclick="readRecipeAloud()">
+            🔊 Read Recipe Aloud
+          </button>
+        </div>
+      </div>
+
+      <!-- Loading state -->
+      <div class="loading-recipe" id="loadingRecipe" style="display:none;">
+        <div class="cooking-loader">
+          <span>🍳</span>
+          <p>Chef Aika is cooking up your recipe...</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─── TOAST ──────────────────────────────────────────────────────────── -->
+  <div class="toast" id="toast"></div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+
+</html>

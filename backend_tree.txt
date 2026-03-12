@@ -1,0 +1,86 @@
+﻿Folder PATH listing
+Volume serial number is 9838-7CEE
+C:\USERS\ABCOM\DESKTOP\CHEFAI\BACKEND
+ª   .env
+ª   requirements.txt
+ª   
++---app
+    ª   main.py
+    ª   __init__.py
+    ª   
+    +---api
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---v1
+    ª   ª   ª   ingredients.py
+    ª   ª   ª   live.py
+    ª   ª   ª   recipes.py
+    ª   ª   ª   vision.py
+    ª   ª   ª   __init__.py
+    ª   ª   ª   
+    ª   ª   +---__pycache__
+    ª   ª           ingredients.cpython-311.pyc
+    ª   ª           live.cpython-311.pyc
+    ª   ª           recipes.cpython-311.pyc
+    ª   ª           vision.cpython-311.pyc
+    ª   ª           __init__.cpython-311.pyc
+    ª   ª           
+    ª   +---__pycache__
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---core
+    ª   ª   config.py
+    ª   ª   prompts.py
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---__pycache__
+    ª           config.cpython-311.pyc
+    ª           prompts.cpython-311.pyc
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---db
+    ª   ª   firestore.py
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---__pycache__
+    ª           database.cpython-311.pyc
+    ª           firestore.cpython-311.pyc
+    ª           session.cpython-311.pyc
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---models
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---__pycache__
+    ª           fridge.cpython-311.pyc
+    ª           ingredient.cpython-311.pyc
+    ª           recipe.cpython-311.pyc
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---schemas
+    ª   ª   fridge.py
+    ª   ª   ingredient.py
+    ª   ª   recipe.py
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---__pycache__
+    ª           fridge.cpython-311.pyc
+    ª           recipe.cpython-311.pyc
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---services
+    ª   ª   ai_service.py
+    ª   ª   live_service.py
+    ª   ª   vision_service.py
+    ª   ª   __init__.py
+    ª   ª   
+    ª   +---__pycache__
+    ª           ai_service.cpython-311.pyc
+    ª           live_service.cpython-311.pyc
+    ª           vision_service.cpython-311.pyc
+    ª           __init__.cpython-311.pyc
+    ª           
+    +---__pycache__
+            main.cpython-311.pyc
+            __init__.cpython-311.pyc
+            
