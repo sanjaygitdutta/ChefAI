@@ -7,14 +7,13 @@ import json
 import re
 from io import BytesIO
 
-import google.generativeai as genai
-from fastapi import HTTPException, status
+import google.generativeai as genai  # type: ignore
+from fastapi import HTTPException, status  # type: ignore
 from PIL import Image
 
-from backend.app.core.config import settings
+from backend.app.core.config import settings  # type: ignore
 
-genai.configure(api_key=settings.GEMINI_API_KEY)
-vision_model = genai.GenerativeModel("gemini-1.5-flash")
+VISION_MODEL_NAME = "gemini-2.5-flash"
 
 VISION_PROMPT = """
 You are an expert chef AI analyzing a photo of a fridge, pantry, or collection of food items.
@@ -47,6 +46,10 @@ async def analyze_fridge_image(image_bytes: bytes, mime_type: str = "image/jpeg"
         )
 
     try:
+        # Configure API key and create model fresh each call
+        genai.configure(api_key=settings.GEMINI_API_KEY)
+        vision_model = genai.GenerativeModel(VISION_MODEL_NAME)
+
         # Encode the image as base64 for Gemini
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 

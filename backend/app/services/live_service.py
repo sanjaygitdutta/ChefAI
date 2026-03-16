@@ -1,38 +1,70 @@
 """
 Gemini Live API service — handles real-time voice/audio WebSocket proxying.
-This bridges the browser's microphone stream to Gemini Live API.
+
+High-Responsiveness Strategy:
+  - Real-time streaming: Audio chunks sent to Gemini IMMEDIATELY as they arrive.
+  - Latency: Gemini processes voice incrementally while the user is still speaking.
+  - Snap Turn Detection: Sends turn_complete=True after 0.8s of silence.
 """
 import asyncio
 import base64
-import json
+import time
 
-import google.generativeai as genai
-from fastapi import WebSocket, WebSocketDisconnect
+from google import genai  # type: ignore
+from google.genai import types  # type: ignore
+from fastapi import WebSocket, WebSocketDisconnect  # type: ignore
 
 from backend.app.core.config import settings
 from backend.app.core.prompts import CHEF_SYSTEM_PROMPT
-from backend.app.db.firestore import get_firestore_client
 
-genai.configure(api_key=settings.GEMINI_API_KEY)
+LIVE_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
+
+# Tool definitions for Gemini to control the UI
+TOOLS = [
+    {
+        "function_declarations": [
+            {
+                "name": "trigger_camera_scan",
+                "description": "Opens the user's camera to scan ingredients or identify items in the kitchen.",
+            },
+            {
+                "name": "generate_recipe_ui",
+                "description": "Triggers the automatic generation of a recipe based on currently loaded ingredients. Use this when the user says they are ready to cook or wants a suggestion.",
+            },
+            {
+                "name": "set_kitchen_timer",
+                "description": "Sets a countdown timer with a specific label.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "seconds": {"type": "INTEGER", "description": "Duration in seconds."},
+                        "label": {"type": "STRING", "description": "What the timer is for (e.g. 'Pasta', 'Egg')."}
+                    },
+                    "required": ["seconds", "label"]
+                }
+            },
+            {
+                "name": "highlight_recipe_step",
+                "description": "Visually highlights a specific step in the recipe instructions during a cook-along.",
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "step_text": {"type": "STRING", "description": "The text of the step to highlight."}
+                    },
+                    "required": ["step_text"]
+                }
+            }
+        ]
+    }
+]
+
+# Snappy turn detection: wait 0.8s after last audio chunk to trigger response
+SILENCE_TIMEOUT = 0.8   # seconds
+# Minimum silence before we consider a turn finished (prevents cutting off mid-word)
+TURN_DETECTION_CHECK_INTERVAL = 0.1 # seconds
 
 
 async def handle_live_session(websocket: WebSocket):
-    """
-    Manages a full Gemini Live API voice session for one user.
-    
-    Protocol (JSON over WebSocket):
-    
-    Client → Server:
-      {"type": "audio", "data": "<base64 PCM audio>"}
-      {"type": "text", "data": "a text message from user"}
-      {"type": "end_session"}
-    
-    Server → Client:
-      {"type": "audio", "data": "<base64 PCM audio>", "final": true/false}
-      {"type": "text", "data": "transcript text"}
-      {"type": "error", "message": "..."}
-      {"type": "connected"}
-    """
     await websocket.accept()
 
     if not settings.GEMINI_API_KEY or settings.GEMINI_API_KEY == "your-gemini-api-key-here":
@@ -46,201 +78,177 @@ async def handle_live_session(websocket: WebSocket):
     await websocket.send_json({"type": "connected", "message": "Chef Aika is ready!"})
 
     try:
-        # Use Gemini 2.0 Flash for Live API (multimodal, low latency)
         client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        
-        tools = [{"function_declarations": [
-            {
-                "name": "generate_recipe_ui",
-                "description": "Trigger the frontend UI to generate a recipe based on the user's currently scanned ingredients. Use this whenever the user asks for a recipe or meal idea based on their ingredients.",
-            },
-            {
-                "name": "trigger_camera_scan",
-                "description": "Trigger the frontend UI to open the camera and scan the fridge for ingredients. Use this when the user asks you to look at their fridge or scan ingredients.",
-            },
-            {
-                "name": "save_verbal_recipe",
-                "description": "Save a newly invented recipe that you and the user discussed to their digital cookbook.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "name": {"type": "STRING", "description": "Name of the recipe"},
-                        "description": {"type": "STRING", "description": "Short appetizing description"},
-                        "ingredients_used": {
-                            "type": "ARRAY", 
-                            "items": {"type": "STRING"},
-                            "description": "List of strings, e.g. ['2 eggs', '1 cup flour']"
-                        },
-                        "instructions": {
-                            "type": "ARRAY",
-                            "items": {"type": "STRING"},
-                            "description": "List of instructional steps"
-                        }
-                    },
-                    "required": ["name", "description", "ingredients_used", "instructions"]
-                }
-            },
-            {
-                "name": "set_kitchen_timer",
-                "description": "Start a visual countdown timer on the user's screen. Use this when the user asks you to set a timer for cooking.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "seconds": {"type": "INTEGER", "description": "Total duration of the timer in seconds"},
-                        "label": {"type": "STRING", "description": "Short label for the timer, e.g. 'Boiling Pasta'"}
-                    },
-                    "required": ["seconds", "label"]
-                }
-            },
-            {
-                "name": "switch_to_ramsay_mode",
-                "description": "Drop your friendly persona and immediately become Gordon Ramsay: a harsh, demanding, and sarcastic Michelin-star chef. Use this when the user asks you to be mean or act like Gordon Ramsay."
-            },
-            {
-                "name": "highlight_recipe_step",
-                "description": "Highlight a specific recipe step on the user's screen while you are reading it aloud.",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "step_text": {"type": "STRING", "description": "The exact text of the step you are reading"}
-                    },
-                    "required": ["step_text"]
-                }
-            }
-        ]}]
 
-        live_config = {
-            "response_modalities": ["AUDIO"],
-            "system_instruction": {"parts": [{"text": CHEF_SYSTEM_PROMPT}]},
-            "tools": tools,
-            "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {"voice_name": "Aoede"}  # Warm, natural voice
-                }
-            }
-        }
+        live_config = types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            system_instruction=types.Content(
+                parts=[types.Part(text=CHEF_SYSTEM_PROMPT)]
+            ),
+            tools=TOOLS,
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name="Aoede"
+                    )
+                )
+            )
+        )
 
         async with client.aio.live.connect(
-            model="gemini-2.0-flash-live-001",
+            model=LIVE_MODEL,
             config=live_config
         ) as session:
 
+            # Monitoring state
+            last_audio_time = [time.time()]
+            is_turn_pending = [False]
+
+            async def silence_watcher():
+                """Explicitly signals turn_complete after 0.8s of silence."""
+                while True:
+                    await asyncio.sleep(TURN_DETECTION_CHECK_INTERVAL)
+                    if is_turn_pending[0]:
+                        elapsed = time.time() - last_audio_time[0]
+                        if elapsed >= SILENCE_TIMEOUT:
+                            print(f"[Aika] Turn complete detected (silence: {elapsed:.1f}s). Signaling Gemini...")
+                            is_turn_pending[0] = False
+                            # Empty content with turn_complete triggers immediate response
+                            await session.send_client_content(
+                                turns=[],
+                                turn_complete=True
+                            )
+
             async def receive_from_client():
-                """Listen to messages from the browser."""
+                """Listen to messages from the browser and pump to Gemini."""
                 async for message in websocket.iter_json():
                     msg_type = message.get("type")
 
                     if msg_type == "audio":
-                        # Raw PCM audio from microphone (base64 encoded)
-                        audio_data = base64.b64decode(message["data"])
-                        await session.send({"mime_type": "audio/pcm", "data": audio_data})
+                        # CRITICAL: Stream to Gemini IMMEDIATELY for low latency
+                        # Gemini starts processing while user is still talking.
+                        try:
+                            await session.send_realtime_input(
+                                input=[types.Blob(
+                                    mime_type="audio/pcm;rate=16000",
+                                    data=base64.b64decode(message["data"])
+                                )]
+                            )
+                            last_audio_time[0] = time.time()
+                            is_turn_pending[0] = True
+                        except Exception as ex:
+                            print(f"[Aika] Error streaming audio to Gemini: {ex}")
 
                     elif msg_type == "text":
-                        # Text fallback (if microphone not available)
-                        await session.send(message["data"], end_of_turn=True)
-                        
+                        # Support sending text directly through the websocket to prompt Aika's voice
+                        text_data = message.get("data", "")
+                        if text_data:
+                            print(f"[Aika] Sending text to Model: {text_data}")
+                            try:
+                                await session.send_client_content(
+                                    turns=[types.Content(parts=[types.Part(text=text_data)])],
+                                    turn_complete=True
+                                )
+                            except Exception as ex:
+                                print(f"[Aika] Error sending text to Gemini: {ex}")
+
                     elif msg_type == "image":
-                        # Raw JPEG frame from camera (Ultimate Tweak)
-                        image_data = base64.b64decode(message["data"])
-                        await session.send({"mime_type": "image/jpeg", "data": image_data})
-                        
-                    elif msg_type == "tool_response":
-                        # Send mock result of the tool back to Gemini
-                        tool_res = {
-                            "function_responses": [{
-                                "id": message.get("call_id", ""),
-                                "name": message.get("tool", ""),
-                                "response": {"result": message.get("result", "success")}
-                            }]
-                        }
-                        await session.send(tool_res)
-                        
-                        # Handle backend-side tool execution
-                        tool_name = message.get("tool", "")
-                        args = message.get("args", {})
-                        
-                        if tool_name == "save_verbal_recipe" and message.get("result") == "success":
-                            db = get_firestore_client()
-                            if db is not None:
-                                try:
-                                    recipe_data = {
-                                        "name": args.get("name", "Untitled Recipe"),
-                                        "description": args.get("description", ""),
-                                        "ingredients_used": args.get("ingredients_used", []),
-                                        "instructions": args.get("instructions", []),
-                                        "servings": 2,
-                                        "prep_time": 0,
-                                        "cook_time": 0,
-                                        "dietary_restrictions": [],
-                                        "image_url": None
-                                    }
-                                    db.collection("recipes").add(recipe_data)
-                                    print(f"Saved verbal recipe to Firestore: {recipe_data['name']}")
-                                except Exception as e:
-                                    print(f"Error saving recipe to Firestore: {e}")
+                        # Image messages are immediate turns
+                        is_turn_pending[0] = False
+                        print(f"[Aika] Processing image turn: {message['data']}")
+                        await session.send_client_content(
+                            turns=[types.Content(
+                                parts=[types.Part(text=message["data"])]
+                            )],
+                            turn_complete=True
+                        )
 
                     elif msg_type == "end_session":
                         break
 
             async def receive_from_gemini():
-                """Stream Gemini's audio/text response back to browser."""
+                """Stream Gemini's audio + text chunks back to the browser."""
                 async for response in session.receive():
-                    if response.data:
-                        # Audio chunk — send to browser as base64
-                        await websocket.send_json({
-                            "type": "audio",
-                            "data": base64.b64encode(response.data).decode("utf-8"),
-                            "final": False
-                        })
-                    if response.text:
-                        await websocket.send_json({
-                            "type": "text",
-                            "data": response.text
-                        })
-                        
-                    # Handle Tool Calls securely by inspecting parts
-                    server_content = getattr(response, "server_content", None)
-                    if server_content:
-                        model_turn = getattr(server_content, "model_turn", None)
-                        if model_turn and hasattr(model_turn, "parts"):
-                            for part in model_turn.parts:
-                                if hasattr(part, "function_call") and part.function_call:
-                                    func_name = part.function_call.name
-                                    call_id = getattr(part.function_call, "id", "")
-                                    args = getattr(part.function_call, "args", {})
-                                    
-                                    # Convert args to dict safely
-                                    args_dict = {}
-                                    if isinstance(args, dict):
-                                        args_dict = args
-                                    else:
-                                        try:
-                                            args_dict = dict(args)
-                                        except:
-                                            pass
-
-                                    await websocket.send_json({
-                                        "type": "tool_call",
-                                        "tool": func_name,
-                                        "call_id": call_id,
-                                        "args": args_dict
-                                    })
-
-                        if getattr(server_content, "turn_complete", False):
+                    # Handle Tool Calls FIRST — tool_call is on LiveServerMessage (response),
+                    # not on server_content. Tool call responses arrive with server_content=None,
+                    # so we must check BEFORE the server_content guard below.
+                    tool_call = getattr(response, "tool_call", None)
+                    if tool_call and getattr(tool_call, "function_calls", None):
+                        for fc in tool_call.function_calls:
+                            fc_name = getattr(fc, "name", "")
+                            fc_args = getattr(fc, "args", {})
+                            fc_id   = getattr(fc, "id", "")
+                            print(f"[Aika] Model requested tool: {fc_name}({fc_args})")
+                            # Forward tool call to frontend via WebSocket
                             await websocket.send_json({
-                                "type": "audio", "data": "", "final": True
+                                "type": "tool_call",
+                                "name": fc_name,
+                                "args": dict(fc_args) if fc_args else {},
+                                "id":   fc_id
                             })
 
-            # Run both directions concurrently
+                            # CRITICAL: Respond immediately so Gemini doesn't get stuck waiting.
+                            try:
+                                # The official way to send responses in the google.genai Live API
+                                # We must use LiveClientContent with the tool_response key mapped to parts
+                                await session.send(
+                                    input=types.LiveClientContent(
+                                        tool_response=types.ToolResponse(
+                                            function_responses=[
+                                                types.FunctionResponse(
+                                                    name=fc_name,
+                                                    id=fc_id,
+                                                    response={"result": "success"}
+                                                )
+                                            ]
+                                        )
+                                    )
+                                )
+                            except Exception as e:
+                                print(f"[Aika] Error sending tool response {fc_name}: {e}")
+                        continue  # tool_call responses have no server_content — skip below
+
+                    server_content = response.server_content
+                    if not server_content:
+                        continue
+
+                    model_turn = server_content.model_turn
+                    if model_turn and getattr(model_turn, "parts", None):
+                        for part in model_turn.parts:
+                            # Audio playback
+                            inline_data = getattr(part, "inline_data", None)
+                            if inline_data and getattr(inline_data, "data", None):
+                                await websocket.send_json({
+                                    "type": "audio",
+                                    "data": base64.b64encode(inline_data.data).decode("utf-8"),
+                                    "final": False
+                                })
+
+                            # Text transcript (useful for UI debugging)
+                            part_text = getattr(part, "text", None)
+                            if part_text:
+                                print(f"[Aika] AI: {part_text}")
+                                await websocket.send_json({
+                                    "type": "text",
+                                    "data": part_text
+                                })
+
+                    if getattr(server_content, "turn_complete", False):
+                        await websocket.send_json({
+                            "type": "audio", "data": "", "final": True
+                        })
+
             await asyncio.gather(
                 receive_from_client(),
-                receive_from_gemini()
+                receive_from_gemini(),
+                silence_watcher()
             )
 
     except WebSocketDisconnect:
-        pass  # Browser disconnected — clean exit
+        pass
     except Exception as e:
+        print(f"[Aika] Fatal session error: {e}")
         try:
-            await websocket.send_json({"type": "error", "message": str(e)})
+            await websocket.send_json({"type": "error", "message": f"Session error: {str(e)}"})
         except Exception:
             pass

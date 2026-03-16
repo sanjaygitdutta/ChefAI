@@ -5,10 +5,27 @@
 const API_BASE = "/api/v1";
 const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/live`;
 
+// ── Firebase Configuration ─────────────────────────────────
+const firebaseConfig = {
+  apiKey: "AIzaSyCnaopJUs7z9wXKmq_BW-bwmxOjAIW_aE4",
+  authDomain: "chefai-acb78.firebaseapp.com",
+  projectId: "chefai-acb78",
+  storageBucket: "chefai-acb78.firebasestorage.app",
+  messagingSenderId: "98705917043",
+  appId: "1:98705917043:web:5a18592944a130730f1606",
+  measurementId: "G-QLDLDN52KB"
+};
+
+// Initialize Firebase App
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+
 // ── State ──────────────────────────────────────────────────
 let ingredients = [];
 let voiceSocket = null;
-let audioContext = null;
+let audioContext = null;      // Recording context (mic capture)
+let playbackCtx = null;       // Playback context (Gemini output)
+let nextPlayTime = 0;         // For sequential audio scheduling
 let mediaStream = null;
 let audioProcessor = null;
 let isListening = false;
@@ -138,6 +155,16 @@ async function scanFridge() {
 async function handleImageUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
+
+    // Display the image preview immediately
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        elCameraPreview.innerHTML = `<img src="${e.target.result}" style="width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius);" />`;
+        if (elCameraOverlay) elCameraOverlay.style.display = 'none';
+        if (elCameraVideo) elCameraVideo.style.display = 'none';
+    };
+    reader.readAsDataURL(file);
+
     await processImageBlob(file);
 }
 
@@ -161,8 +188,8 @@ async function processImageBlob(blob) {
             elScanStatus.innerText = `✅ Found ${data.ingredients.length} items!`;
             setTimeout(() => { elScanStatus.innerText = ""; }, 3000);
 
-            if (document.querySelector('.aika-status').textContent.includes('online')) {
-                sendLiveText(`I just showed you my fridge. I now have ${ingredients.length} ingredients loaded.`);
+            if (document.querySelector('.aika-status')?.textContent.includes('online')) {
+                sendVoiceText(`I just showed you my fridge. I now have ${ingredients.length} ingredients loaded.`);
             }
         } else {
             throw new Error("Invalid response format from Vision API.");
@@ -178,6 +205,42 @@ async function processImageBlob(blob) {
 /* ═══════════════════════════════════════════════════════════
    3. RECIPE GENERATION 
    ═══════════════════════════════════════════════════════════ */
+
+// Called when Aika triggers generate_recipe_ui via voice.
+// If the UI ingredients list is empty (user described ingredients verbally),
+// we scrape them from the chat transcript and auto-add them first.
+async function generateRecipeFromVoice() {
+    if (ingredients.length === 0) {
+        // Try to extract ingredients from the last user message in the transcript
+        const userMessages = elTranscriptBox.querySelectorAll('.transcript-message.user span');
+        let detected = [];
+        if (userMessages.length > 0) {
+            const lastMsg = userMessages[userMessages.length - 1].innerText.replace(/^🎤\s*/, '').toLowerCase();
+            // Simple extraction: look for keywords like "have X, Y and Z" or "egg, cheese, tomato"
+            const match = lastMsg.match(/(?:have|got|with|using)?\s*(.+?)(?:\s*(?:what|can|and)\s*(I|i)\s*(?:cook|make|prepare))?$/i);
+            if (match && match[1]) {
+                const raw = match[1].replace(/\s+and\s+/gi, ',').split(/[,]+/);
+                detected = raw.map(s => s.trim()).filter(s => s.length > 1 && s.length < 30);
+            }
+        }
+
+        if (detected.length > 0) {
+            detected.forEach(name => {
+                const cap = name.charAt(0).toUpperCase() + name.slice(1);
+                if (!ingredients.some(i => i.name.toLowerCase() === name)) {
+                    ingredients.push({ name: cap });
+                }
+            });
+            renderIngredients();
+            addTranscriptMessage('ai', `👩‍🍳 Auto-detected ingredients: ${detected.join(', ')}. Generating recipe...`);
+        } else {
+            // If extraction failed, show a toast and ask user to add ingredients manually
+            showToast("Please add your ingredients to the list so I can generate a recipe!");
+            return;
+        }
+    }
+    generateRecipe();
+}
 
 async function generateRecipe() {
     if (ingredients.length === 0) return;
@@ -204,9 +267,34 @@ async function generateRecipe() {
         const recipe = await res.json();
         displayRecipe(recipe);
 
-        // If live voice is connected, tell Aika we generated a recipe
+        // If live voice is connected, tell Aika we generated a recipe and ask her to read it
         if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-            sendLiveText(`I just generated a recipe called ${recipe.name}. It takes ${recipe.cook_time} minutes to cook. Are there any chef's tips you can give me before I start?`);
+            sendVoiceText(`I just generated a recipe called ${recipe.name}. Here are the instructions please read them out loud to me naturally and enthusiastically: ${recipe.instructions.join(' ')}`);
+        } else {
+            // Fallback: auto-read using browser TTS if voice session isn't active
+            setTimeout(readRecipeAloud, 500);
+        }
+        
+        // Critical: Unlock the microphone immediately so the user can speak again
+        // even if Aika decides to stay silent about the recipe.
+        window._isAikaThinking = false;
+        
+        // --- NEW: Save directly to Firebase from Frontend ---
+        try {
+            await db.collection("recipes").add({
+                name: recipe.name,
+                description: recipe.description,
+                ingredients_used: recipe.ingredients_used,
+                instructions: recipe.instructions,
+                servings: recipe.servings,
+                prep_time: recipe.prep_time,
+                cook_time: recipe.cook_time,
+                dietary_restrictions: payload.dietary_restrictions,
+                created_at: firebase.firestore.FieldValue.serverTimestamp()
+            });
+            console.log("Recipe saved directly to Firebase from the web app!");
+        } catch(fbErr) {
+            console.error("Firebase save failed:", fbErr);
         }
 
     } catch (err) {
@@ -247,10 +335,22 @@ function readRecipeAloud() {
     let textToRead = "Here are the steps. " + Array.from(steps).map((s, i) => `Step ${i + 1}: ${s.innerText}`).join(' ');
 
     if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-        sendLiveText(`Please read me the following recipe steps aloud: ${textToRead}`);
+        sendVoiceText(`Please read me the following recipe steps aloud: ${textToRead}`);
     } else {
         // Fallback to browser TTS if Live API not connected
         const utterance = new SpeechSynthesisUtterance(textToRead);
+        
+        // Try to find a female English voice (Zira on Windows, Samantha on Mac, or Google's female voices)
+        const voices = window.speechSynthesis.getVoices();
+        const femaleVoice = voices.find(v => 
+            v.lang.startsWith('en') && 
+            (v.name.includes('Female') || v.name.includes('Zira') || v.name.includes('Samantha') || v.name.includes('Google US English'))
+        ) || voices.find(v => v.lang.startsWith('en'));
+        
+        if (femaleVoice) {
+            utterance.voice = femaleVoice;
+        }
+
         window.speechSynthesis.speak(utterance);
         showToast("Reading aloud via Browser Speech (Connect Chef Aika for live voice!)");
     }
@@ -288,7 +388,7 @@ function startTimer(seconds, label) {
             
             // Notify AI
             if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-                sendLiveText(`<system_event> timer_done: ${label} </system_event>`);
+                sendVoiceText(`<system_event> timer_done: ${label} </system_event>`);
             }
         } else {
             updateDisplay();
@@ -321,29 +421,86 @@ async function toggleVoice() {
 
 async function startVoiceSession() {
     try {
-        // 1. Get Microphone Access (16kHz for Gemini)
-        mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true }
-        });
+        // STEP 1: Create the playback AudioContext SYNCHRONOUSLY during button click!
+        // Required by browsers — must happen before any await or it gets suspended/muted.
+        playbackCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        nextPlayTime = 0;
+        if (playbackCtx.state === 'suspended') {
+            await playbackCtx.resume();
+        }
 
-        // 2. Setup Web Audio API
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-        const source = audioContext.createMediaStreamSource(mediaStream);
-
-        // ScriptProcessor is deprecated but widely supported and easiest for raw PCM extraction without AudioWorklets
-        audioProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-
-        // 3. Setup WebSocket to backend
+        // STEP 2: Connect WebSocket to backend
         voiceSocket = new WebSocket(WS_URL);
 
         voiceSocket.onopen = () => {
             isListening = true;
+            console.log('[Aika] WebSocket open.');
+
             elBtnVoice.classList.add("listening");
             elBtnVoice.innerHTML = `<span class="voice-icon">🛑</span><span class="voice-label">Stop Chef Aika</span>`;
             elWaveform.classList.add("active");
             elStatusDot.className = "status-dot listening";
             elStatusText.innerText = "Chef Aika is listening...";
             addTranscriptMessage("ai", "👩‍🍳 Connecting to kitchen audio...");
+
+            const textRow = document.getElementById('voiceTextRow');
+            if (textRow) textRow.style.display = 'flex';
+
+            // STEP 3: Use browser's native SpeechRecognition API for voice-to-text
+            // This is 100% reliable and bypasses all audio format / VAD issues
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                showToast("Voice recognition not supported in this browser. Please use Chrome or Edge.");
+                return;
+            }
+
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'en-US';
+            recognition.continuous = true;       // Keep listening
+            recognition.interimResults = false;   // Only final results
+
+            recognition.onresult = (event) => {
+                const result = event.results[event.results.length - 1];
+                if (result.isFinal) {
+                    const transcript = result[0].transcript.trim();
+                    if (!transcript) return;
+
+                    // Prevent turn collision if Aika is already responding
+                    if (window._isAikaThinking) {
+                        console.log('[Aika] Ignoring speech (still thinking):', transcript);
+                        return;
+                    }
+
+                    console.log('[Aika] Heard:', transcript);
+                    addTranscriptMessage('user', `🎤 ${transcript}`);
+                    elStatusDot.className = "status-dot listening";
+                    elStatusText.innerText = "Chef Aika is thinking...";
+                    window._isAikaThinking = true;
+
+                    // Send transcribed text to Aika via WebSocket
+                    if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
+                        voiceSocket.send(JSON.stringify({ type: 'text', data: transcript }));
+                    }
+                }
+            };
+
+            recognition.onerror = (e) => {
+                if (e.error === 'no-speech') return; // Normal — just silence
+                console.warn('[Aika] Speech recognition error:', e.error);
+            };
+
+            recognition.onend = () => {
+                // Auto-restart so it keeps listening continuously
+                if (isListening) {
+                    try { recognition.start(); } catch (_) {}
+                }
+            };
+
+            recognition.start();
+            console.log('[Aika] Speech recognition started!');
+
+            // Store reference so we can stop it later
+            window._aikaRecognition = recognition;
         };
 
         voiceSocket.onmessage = async (event) => {
@@ -353,123 +510,78 @@ async function startVoiceSession() {
                 addTranscriptMessage("ai", `👩‍🍳 ${msg.message}`);
                 elStatusDot.className = "status-dot online";
                 elStatusText.innerText = "Chef Aika is online";
+                window._isAikaThinking = false;
             }
             else if (msg.type === "text") {
-                addTranscriptMessage("ai", `👩‍🍳 ${msg.data}`);
+                let text = msg.data;
+                
+                // --- Ramsay Mode detection ---
+                const avatar = document.querySelector('.aika-avatar');
+                if (text.includes('<angry>')) {
+                    if (avatar) avatar.classList.add('ramsay-mode');
+                }
+                if (text.includes('</angry>')) {
+                    if (avatar) avatar.classList.remove('ramsay-mode');
+                }
+                
+                // Remove tags from the user-facing transcript
+                text = text.replace(/<angry>/g, '').replace(/<\/angry>/g, '');
+                
+                addTranscriptMessage("ai", `👩‍🍳 ${text}`);
             }
             else if (msg.type === "audio") {
                 if (msg.data) {
-                    playGeminiAudio(msg.data);
+                    scheduleGeminiAudio(msg.data);
                 }
                 if (msg.final) {
-                    // Turn complete
                     elStatusDot.className = "status-dot online";
                     elStatusText.innerText = "Chef Aika is online";
+                    window._isAikaThinking = false; // Response finished!
                 } else {
                     elStatusDot.className = "status-dot listening";
                     elStatusText.innerText = "Chef Aika is speaking...";
                 }
             }
-            else if (msg.type === "tool_call") {
-                console.log("Chef Aika invoked tool:", msg.tool);
-
-                let result = "success";
-
-                if (msg.tool === "generate_recipe_ui") {
-                    showToast("Chef Aika is generating a recipe for you...");
-                    addTranscriptMessage("ai", "👩‍🍳 Cooking it up in the UI right now!");
-                    generateRecipe();
-                }
-                else if (msg.tool === "trigger_camera_scan") {
-                    showToast("Chef Aika opened the camera scanner.");
-                    addTranscriptMessage("ai", "👩‍🍳 Opening the camera so you can show me!");
-                    startCamera();
-                }
-                else if (msg.tool === "set_kitchen_timer") {
-                    const secs = msg.args.seconds || 60;
-                    const label = msg.args.label || "Timer";
-                    showToast(`Chef Aika set a timer for ${label}.`);
-                    addTranscriptMessage("ai", `👩‍🍳 Setting a timer for ${label}!`);
-                    startTimer(secs, label);
-                }
-                else if (msg.tool === "save_verbal_recipe") {
-                    showToast("Recipe saved to your cookbook!");
-                    addTranscriptMessage("ai", "👩‍🍳 I've saved that recipe to your cookbook.");
-                    // The backend handles the actual Firestore saving
-                }
-                else if (msg.tool === "switch_to_ramsay_mode") {
-                    showToast("Gordon Ramsay Mode Activated 🤬");
-                    addTranscriptMessage("ai", "🤬 YOU CALL THAT COOKING?!");
-                    document.getElementById('aikaAvatar').classList.add('ramsay-mode');
-                    document.querySelector('.aika-name').innerText = "Chef Ramsay";
-                    document.querySelector('.aika-name').style.color = "var(--warm-red)";
-                    document.querySelector('.aika-tagline').innerText = "Idiot Sandwich Maker";
-                    document.querySelector('.avatar-emoji').innerText = "🤬";
-                }
-                else if (msg.tool === "highlight_recipe_step") {
-                    const stepText = msg.args.step_text;
-                    if (stepText) highlightRecipeStep(stepText);
-                }
-                else {
-                    result = "unsupported_tool";
-                }
-
-                // Let Gemini know we executed the tool
-                if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
-                    voiceSocket.send(JSON.stringify({
-                        type: "tool_response",
-                        tool: msg.tool,
-                        call_id: msg.call_id,
-                        result: result
-                    }));
-                }
-            }
             else if (msg.type === "error") {
                 showToast("AI Error: " + msg.message);
+                window._isAikaThinking = false;
                 stopVoiceSession();
+            }
+            else if (msg.type === "tool_call") {
+                console.log(`[Aika] Executing tool: ${msg.name}`, msg.args);
+                window._isAikaThinking = false; // Reset listening state so user can speak!
+                
+                if (msg.name === "trigger_camera_scan") {
+                    startCamera();
+                } 
+                else if (msg.name === "generate_recipe_ui") {
+                    generateRecipeFromVoice();
+                }
+                else if (msg.name === "set_kitchen_timer") {
+                    startTimer(msg.args.seconds, msg.args.label);
+                }
+                else if (msg.name === "highlight_recipe_step") {
+                    highlightRecipeStep(msg.args.step_text);
+                }
             }
         };
 
         voiceSocket.onclose = () => {
             stopVoiceSession();
             addTranscriptMessage("ai", "👩‍🍳 Session ended. Bon appétit!");
+            const textRow = document.getElementById('voiceTextRow');
+            if (textRow) textRow.style.display = 'none';
         };
 
-        // 4. Send Audio Chunks to backend
-        audioProcessor.onaudioprocess = (e) => {
-            if (!isListening || voiceSocket.readyState !== WebSocket.OPEN || isPlayingGeminiAudio) return;
-
-            const inputData = e.inputBuffer.getChannelData(0);
-            const pcm16Data = float32ToPcm16(inputData);
-            const base64Audio = arrayBufferToBase64(pcm16Data.buffer);
-
-            voiceSocket.send(JSON.stringify({ type: "audio", data: base64Audio }));
+        voiceSocket.onerror = (err) => {
+            console.error('[Aika] WebSocket error:', err);
+            showToast("Connection error. Please try again.");
+            stopVoiceSession();
         };
-
-        // 5. Send Live Video Frames to backend (Ultimate Tweak)
-        videoInterval = setInterval(() => {
-            if (isListening && voiceSocket.readyState === WebSocket.OPEN && elCameraVideo.srcObject) {
-                // Draw current video frame to canvas
-                elCameraCanvas.width = elCameraVideo.videoWidth;
-                elCameraCanvas.height = elCameraVideo.videoHeight;
-                const ctx = elCameraCanvas.getContext('2d');
-                ctx.drawImage(elCameraVideo, 0, 0);
-
-                // Get JPEG base64 string
-                const dataUrl = elCameraCanvas.toDataURL('image/jpeg', 0.5); // High compression
-                const base64Image = dataUrl.split(',')[1];
-
-                // Send over WebSocket
-                voiceSocket.send(JSON.stringify({ type: "image", data: base64Image }));
-            }
-        }, 2000); // 1 frame every 2 seconds is enough for Gemini Live API
-
-        source.connect(audioProcessor);
-        audioProcessor.connect(audioContext.destination);
 
     } catch (err) {
-        console.error("Microphone setup failed:", err);
-        showToast("Could not access microphone.");
+        console.error("Voice session failed:", err);
+        showToast("Could not start voice session. Please try again.");
     }
 }
 
@@ -491,6 +603,12 @@ function stopVoiceSession() {
         audioContext = null;
     }
 
+    if (playbackCtx && playbackCtx.state !== 'closed') {
+        playbackCtx.close();
+        playbackCtx = null;
+    }
+    nextPlayTime = 0;
+
     if (videoInterval) {
         clearInterval(videoInterval);
         videoInterval = null;
@@ -503,7 +621,28 @@ function stopVoiceSession() {
     elStatusText.innerText = "Chef Aika is offline";
 }
 
-function sendLiveText(text) {
+function sendTextToAika() {
+    const input = document.getElementById('voiceTextInput');
+    if (!input || !input.value.trim()) return;
+    const text = input.value.trim();
+    input.value = '';
+    if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
+        addTranscriptMessage('user', `👤 ${text}`);
+        voiceSocket.send(JSON.stringify({ type: 'text', data: text }));
+    } else {
+        showToast('Start a voice session first!');
+    }
+}
+
+// Enter key support for text input
+const voiceTextInputEl = document.getElementById('voiceTextInput');
+if (voiceTextInputEl) {
+    voiceTextInputEl.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') sendTextToAika();
+    });
+}
+
+function sendVoiceText(text) {
     if (voiceSocket && voiceSocket.readyState === WebSocket.OPEN) {
         voiceSocket.send(JSON.stringify({ type: "text", data: text }));
     }
@@ -537,30 +676,90 @@ function base64ToArrayBuffer(base64) {
     return bytes.buffer;
 }
 
-async function playGeminiAudio(base64Audio) {
-    if (!audioContext) return;
-    isPlayingGeminiAudio = true; // Pause mic processing while speaking
+// Downsample float32 audio from inputRate to outputRate using linear interpolation
+function downsample(buffer, inputRate, outputRate) {
+    if (inputRate === outputRate) return buffer;
+    const ratio = inputRate / outputRate;
+    const newLength = Math.round(buffer.length / ratio);
+    const result = new Float32Array(newLength);
+    for (let i = 0; i < newLength; i++) {
+        const pos = i * ratio;
+        const index = Math.floor(pos);
+        const frac = pos - index;
+        const a = buffer[index] || 0;
+        const b = buffer[index + 1] || 0;
+        result[i] = a + frac * (b - a);
+    }
+    return result;
+}
+
+// Proper anti-aliased downsampling to 16kHz using box-filter averaging
+// Averages every N input samples into 1 output sample — eliminates aliasing distortion
+function downsampleTo16k(inputBuffer, inputRate) {
+    const TARGET_RATE = 16000;
+    if (inputRate === TARGET_RATE) return inputBuffer;
+
+    // ratio must be integer-ish for best quality (48000/16000 = 3)
+    const ratio = inputRate / TARGET_RATE;
+    const outputLength = Math.floor(inputBuffer.length / ratio);
+    const output = new Float32Array(outputLength);
+
+    for (let i = 0; i < outputLength; i++) {
+        const start = Math.floor(i * ratio);
+        const end = Math.min(Math.floor((i + 1) * ratio), inputBuffer.length);
+        let sum = 0;
+        for (let j = start; j < end; j++) {
+            sum += inputBuffer[j];
+        }
+        output[i] = sum / (end - start);
+    }
+    return output;
+}
+
+// Schedule Gemini audio chunks sequentially using one shared playbackCtx
+function scheduleGeminiAudio(base64Audio) {
+    if (!playbackCtx) {
+        console.warn('[Aika] No playbackCtx — cannot play audio!');
+        return;
+    }
+
+    // CRITICAL: Resume suspended AudioContext. Browsers auto-suspend after inactivity.
+    if (playbackCtx.state === 'suspended') {
+        console.log('[Aika] Resuming suspended playbackCtx...');
+        playbackCtx.resume();
+    }
 
     try {
         const arrayBuffer = base64ToArrayBuffer(base64Audio);
+        
+        // Convert raw 16-bit PCM (from Gemini) to Float32 for Web Audio API manually.
+        const pcm16 = new Int16Array(arrayBuffer);
+        const float32 = new Float32Array(pcm16.length);
+        for (let i = 0; i < pcm16.length; i++) {
+            float32[i] = pcm16[i] / 32768.0;
+        }
 
-        // The Gemini Live API returns raw 24kHz PCM 16-bit mono audio
-        // We need to wrap it in a WAV header for the browser AudioContext to decode it
-        const wavBuffer = createWavHeader(arrayBuffer, 24000, 1, 16);
+        const audioBuffer = playbackCtx.createBuffer(1, float32.length, 24000);
+        audioBuffer.getChannelData(0).set(float32);
 
-        const audioBuffer = await audioContext.decodeAudioData(wavBuffer);
-        const source = audioContext.createBufferSource();
+        const source = playbackCtx.createBufferSource();
         source.buffer = audioBuffer;
-        source.connect(audioContext.destination);
+        source.connect(playbackCtx.destination);
 
-        source.onended = () => { isPlayingGeminiAudio = false; };
-        source.start(0);
+        const currentTime = playbackCtx.currentTime;
+        if (nextPlayTime < currentTime) {
+            nextPlayTime = currentTime + 0.05;
+        }
+        
+        source.start(nextPlayTime);
+        nextPlayTime += audioBuffer.duration;
+        console.log(`[Aika] Scheduled audio: ${pcm16.length} samples, ctx state=${playbackCtx.state}`);
 
     } catch (err) {
-        console.error("Error playing audio chunk:", err);
-        isPlayingGeminiAudio = false;
+        console.error('[Aika] Error scheduling audio chunk:', err);
     }
 }
+
 
 // Wraps raw PCM data from Gemini into a WAV file format that AudioContext can read
 function createWavHeader(pcmBuffer, sampleRate, numChannels, bitsPerSample) {

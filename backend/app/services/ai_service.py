@@ -1,16 +1,15 @@
 import json
 import re
-import google.generativeai as genai
-from fastapi import HTTPException, status
+import time
+import google.generativeai as genai  # type: ignore
+from fastapi import HTTPException, status  # type: ignore
 
-from backend.app.core.config import settings
-from backend.app.schemas.recipe import RecipeGenerateRequest, AIRecipeResponse
+from backend.app.core.config import settings  # type: ignore
+from backend.app.schemas.recipe import RecipeGenerateRequest, AIRecipeResponse  # type: ignore
 
-# Configure the Gemini client with our API key
-genai.configure(api_key=settings.GEMINI_API_KEY)
-
-# Use Gemini Flash — it's fast and very capable for this kind of structured generation
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Primary and fallback models
+PRIMARY_MODEL = "gemini-2.5-flash"
+FALLBACK_MODEL = "gemini-2.5-flash-lite"
 
 
 def _build_prompt(request: RecipeGenerateRequest) -> str:
@@ -43,6 +42,28 @@ Respond ONLY with a valid JSON object (no markdown, no explanation), following t
 """
 
 
+def _call_model_with_retry(prompt: str, model_name: str, max_retries: int = 2) -> str:
+    """Calls a Gemini model with exponential backoff retry on quota errors."""
+    # Configure fresh every call to always use the latest API key from .env
+    genai.configure(api_key=settings.GEMINI_API_KEY)
+    model = genai.GenerativeModel(model_name)
+    last_error: Exception = RuntimeError("No attempts made")
+    for attempt in range(max_retries + 1):
+        try:
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            last_error = e
+            err_str = str(e)
+            if "429" in err_str and attempt < max_retries:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s...
+                print(f"Rate limit hit on {model_name}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise
+    raise last_error
+
+
 async def generate_recipe_from_ingredients(request: RecipeGenerateRequest) -> AIRecipeResponse:
     """
     Calls the Gemini API and returns a structured recipe.
@@ -57,10 +78,17 @@ async def generate_recipe_from_ingredients(request: RecipeGenerateRequest) -> AI
     prompt = _build_prompt(request)
 
     try:
-        response = model.generate_content(prompt)
-        raw_text = response.text.strip()
+        # Try primary model first, then fallback if quota exceeded
+        try:
+            raw_text = _call_model_with_retry(prompt, PRIMARY_MODEL)
+        except Exception as e:
+            if "429" in str(e):
+                print(f"Primary model quota exhausted, falling back to {FALLBACK_MODEL}...")
+                raw_text = _call_model_with_retry(prompt, FALLBACK_MODEL)
+            else:
+                raise
 
-        # Sometimes Gemini wraps the JSON in markdown code fences — strip them if present
+        # Strip markdown code fences if present
         raw_text = re.sub(r"^```json\s*", "", raw_text)
         raw_text = re.sub(r"\s*```$", "", raw_text)
 

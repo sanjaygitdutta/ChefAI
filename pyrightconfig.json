@@ -1,0 +1,12 @@
+{
+  "pythonVersion": "3.11",
+  "pythonPlatform": "Windows",
+  "pythonPath": "C:\\Users\\abcom\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+  "include": ["."],
+  "extraPaths": [
+    ".",
+    "C:\\Users\\abcom\\AppData\\Local\\Programs\\Python\\Python311\\Lib\\site-packages"
+  ],
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none"
+}

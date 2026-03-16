@@ -1,5 +1,6 @@
 # Python virtual environment
 venv/
+env/
 
 # Secret environment file - NEVER share this!
 .env

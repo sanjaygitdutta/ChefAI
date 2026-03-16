@@ -1,11 +1,11 @@
 import os
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi import FastAPI  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
+from fastapi.staticfiles import StaticFiles  # type: ignore
+from fastapi.responses import FileResponse  # type: ignore
 
-from backend.app.core.config import settings
-from backend.app.api.v1 import ingredients, recipes, vision, live
+from backend.app.core.config import settings  # type: ignore
+from backend.app.api.v1 import ingredients, recipes, vision, live  # type: ignore
 
 # Create the FastAPI app
 app = FastAPI(
